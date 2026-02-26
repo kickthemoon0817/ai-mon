@@ -1,0 +1,344 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Usage Monitor</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        dark: { 800: '#1e1e2e', 900: '#11111b', 700: '#313244', 600: '#45475a' },
+                        claude: '#d4a574',
+                        codex: '#74b9ff',
+                        antigravity: '#a29bfe',
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body { background: #11111b; color: #cdd6f4; font-family: system-ui, -apple-system, sans-serif; }
+        .card { background: #1e1e2e; border: 1px solid #313244; border-radius: 12px; }
+        .glow-claude { box-shadow: 0 0 20px rgba(212, 165, 116, 0.15); }
+        .glow-codex { box-shadow: 0 0 20px rgba(116, 185, 255, 0.15); }
+        .glow-antigravity { box-shadow: 0 0 20px rgba(162, 155, 254, 0.15); }
+        .hour-cell { width: 28px; height: 28px; border-radius: 4px; font-size: 10px; display: flex; align-items: center; justify-content: center; }
+    </style>
+</head>
+<body class="min-h-screen p-6">
+    <div class="max-w-7xl mx-auto">
+        <!-- Header -->
+        <div class="flex items-center justify-between mb-8">
+            <div>
+                <h1 class="text-3xl font-bold text-white">AI Usage Monitor</h1>
+                <p class="text-sm text-gray-400 mt-1">Tracking Claude Code, Codex, and Antigravity</p>
+            </div>
+            <div class="flex items-center gap-4">
+                <span id="lastRefreshed" class="text-xs text-gray-500"></span>
+                <button onclick="refresh()" class="px-4 py-2 bg-dark-700 hover:bg-dark-600 rounded-lg text-sm transition">
+                    Refresh
+                </button>
+            </div>
+        </div>
+
+        <!-- Service Cards -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8" id="serviceCards"></div>
+
+        <!-- Charts -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <div class="card p-6">
+                <div class="flex items-center justify-between mb-4">
+                    <h2 class="text-lg font-semibold text-white">Daily Messages</h2>
+                    <div class="flex gap-2" id="chartTabs"></div>
+                </div>
+                <canvas id="messagesChart" height="200"></canvas>
+            </div>
+            <div class="card p-6">
+                <h2 class="text-lg font-semibold text-white mb-4">Daily Tokens</h2>
+                <canvas id="tokensChart" height="200"></canvas>
+            </div>
+        </div>
+
+        <!-- Hourly Activity + Model Usage -->
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+            <div class="card p-6">
+                <h2 class="text-lg font-semibold text-white mb-4">Hourly Activity (Claude Code)</h2>
+                <div id="hourlyGrid" class="flex flex-wrap gap-1"></div>
+            </div>
+            <div class="card p-6">
+                <h2 class="text-lg font-semibold text-white mb-4">Model Usage</h2>
+                <canvas id="modelChart" height="200"></canvas>
+            </div>
+        </div>
+
+        <!-- Quota Gauges -->
+        <div class="card p-6 mb-8">
+            <h2 class="text-lg font-semibold text-white mb-4">Estimated Quota Usage (This Period)</h2>
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-6" id="quotaGauges"></div>
+        </div>
+    </div>
+
+<script>
+const SERVICE_COLORS = { claude: '#d4a574', codex: '#74b9ff', antigravity: '#a29bfe' };
+const SERVICE_LABELS = { claude: 'Claude Code', codex: 'OpenAI Codex', antigravity: 'Antigravity' };
+const SERVICE_ICONS = { claude: '🧠', codex: '💻', antigravity: '🚀' };
+
+// Rough monthly limits for consumer plans (estimates)
+const QUOTA_LIMITS = {
+    claude: { messages: 1500, label: 'messages/month' },
+    codex: { messages: 500, label: 'messages/month' },
+    antigravity: { messages: 300, label: 'conversations/month' },
+};
+
+let charts = {};
+let data = null;
+
+async function fetchData() {
+    const resp = await fetch('/api/summary');
+    data = await resp.json();
+    render();
+}
+
+async function refresh() {
+    const resp = await fetch('/api/refresh');
+    data = await resp.json();
+    render();
+}
+
+function render() {
+    if (!data) return;
+    document.getElementById('lastRefreshed').textContent =
+        data.last_refreshed ? `Updated: ${new Date(data.last_refreshed).toLocaleString()}` : '';
+
+    renderCards();
+    renderMessagesChart();
+    renderTokensChart();
+    renderHourlyGrid();
+    renderModelChart();
+    renderQuotaGauges();
+}
+
+function getService(name) {
+    return data.services.find(s => s.service === name) || { daily_usage: [], model_tokens: [], total_messages: 0, total_sessions: 0, total_tokens: 0, hour_counts: {} };
+}
+
+function thisMonthMessages(svc) {
+    const now = new Date();
+    const prefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    return svc.daily_usage
+        .filter(d => d.date.startsWith(prefix))
+        .reduce((sum, d) => sum + (d.message_count || d.conversation_count || 0), 0);
+}
+
+function renderCards() {
+    const container = document.getElementById('serviceCards');
+    container.innerHTML = '';
+    for (const name of ['claude', 'codex', 'antigravity']) {
+        const svc = getService(name);
+        const color = SERVICE_COLORS[name];
+        const monthMsgs = thisMonthMessages(svc);
+        const metric = name === 'antigravity' ? 'conversations' : 'messages';
+        const mainCount = name === 'antigravity' ? svc.total_messages : svc.total_messages;
+
+        container.innerHTML += `
+            <div class="card glow-${name} p-6">
+                <div class="flex items-center gap-3 mb-4">
+                    <span class="text-2xl">${SERVICE_ICONS[name]}</span>
+                    <h3 class="text-lg font-semibold" style="color:${color}">${SERVICE_LABELS[name]}</h3>
+                </div>
+                <div class="grid grid-cols-2 gap-4">
+                    <div>
+                        <p class="text-2xl font-bold text-white">${mainCount.toLocaleString()}</p>
+                        <p class="text-xs text-gray-400">total ${metric}</p>
+                    </div>
+                    <div>
+                        <p class="text-2xl font-bold text-white">${svc.total_sessions.toLocaleString()}</p>
+                        <p class="text-xs text-gray-400">sessions</p>
+                    </div>
+                    <div>
+                        <p class="text-2xl font-bold text-white">${monthMsgs.toLocaleString()}</p>
+                        <p class="text-xs text-gray-400">this month</p>
+                    </div>
+                    <div>
+                        <p class="text-2xl font-bold text-white">${formatTokens(svc.total_tokens)}</p>
+                        <p class="text-xs text-gray-400">${name === 'antigravity' ? 'total size' : 'tokens'}</p>
+                    </div>
+                </div>
+                ${svc.first_date ? `<p class="text-xs text-gray-500 mt-3">Active: ${svc.first_date} → ${svc.last_date}</p>` : ''}
+            </div>`;
+    }
+}
+
+function formatTokens(n) {
+    if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+    return n.toString();
+}
+
+function getAllDates() {
+    const dates = new Set();
+    for (const svc of data.services) {
+        for (const d of svc.daily_usage) dates.add(d.date);
+    }
+    return [...dates].sort();
+}
+
+function renderMessagesChart() {
+    const ctx = document.getElementById('messagesChart').getContext('2d');
+    if (charts.messages) charts.messages.destroy();
+
+    const dates = getAllDates();
+    const datasets = [];
+    for (const name of ['claude', 'codex', 'antigravity']) {
+        const svc = getService(name);
+        const byDate = {};
+        svc.daily_usage.forEach(d => byDate[d.date] = d.message_count || d.conversation_count || 0);
+        datasets.push({
+            label: SERVICE_LABELS[name],
+            data: dates.map(d => byDate[d] || 0),
+            borderColor: SERVICE_COLORS[name],
+            backgroundColor: SERVICE_COLORS[name] + '33',
+            fill: true,
+            tension: 0.3,
+            pointRadius: 3,
+        });
+    }
+
+    charts.messages = new Chart(ctx, {
+        type: 'line',
+        data: { labels: dates.map(d => d.slice(5)), datasets },
+        options: chartOptions('Messages'),
+    });
+}
+
+function renderTokensChart() {
+    const ctx = document.getElementById('tokensChart').getContext('2d');
+    if (charts.tokens) charts.tokens.destroy();
+
+    const dates = getAllDates();
+    const datasets = [];
+    for (const name of ['claude', 'codex']) {
+        const svc = getService(name);
+        const byDate = {};
+        svc.daily_usage.forEach(d => byDate[d.date] = d.token_count || 0);
+        datasets.push({
+            label: SERVICE_LABELS[name],
+            data: dates.map(d => byDate[d] || 0),
+            backgroundColor: SERVICE_COLORS[name] + '99',
+            borderColor: SERVICE_COLORS[name],
+            borderWidth: 1,
+        });
+    }
+
+    charts.tokens = new Chart(ctx, {
+        type: 'bar',
+        data: { labels: dates.map(d => d.slice(5)), datasets },
+        options: chartOptions('Tokens'),
+    });
+}
+
+function chartOptions(yLabel) {
+    return {
+        responsive: true,
+        interaction: { intersect: false, mode: 'index' },
+        scales: {
+            x: { ticks: { color: '#6c7086', maxTicksLimit: 15 }, grid: { color: '#31324422' } },
+            y: { ticks: { color: '#6c7086' }, grid: { color: '#31324422' }, beginAtZero: true },
+        },
+        plugins: { legend: { labels: { color: '#cdd6f4' } } },
+    };
+}
+
+function renderHourlyGrid() {
+    const container = document.getElementById('hourlyGrid');
+    const svc = getService('claude');
+    const counts = svc.hour_counts || {};
+    const maxCount = Math.max(1, ...Object.values(counts));
+
+    container.innerHTML = '';
+    for (let h = 0; h < 24; h++) {
+        const count = counts[String(h)] || 0;
+        const intensity = count / maxCount;
+        const bg = intensity > 0
+            ? `rgba(212, 165, 116, ${0.15 + intensity * 0.85})`
+            : 'rgba(49, 50, 68, 0.5)';
+        container.innerHTML += `
+            <div class="hour-cell" style="background:${bg}" title="${h}:00 — ${count} sessions">
+                ${h}
+            </div>`;
+    }
+}
+
+function renderModelChart() {
+    const ctx = document.getElementById('modelChart').getContext('2d');
+    if (charts.model) charts.model.destroy();
+
+    const allModels = [];
+    for (const svc of data.services) {
+        for (const mt of svc.model_tokens || []) {
+            allModels.push(mt);
+        }
+    }
+    if (!allModels.length) return;
+
+    const labels = allModels.map(m => m.model.replace(/^claude-/, '').replace(/^gpt-/, ''));
+    const inputData = allModels.map(m => m.input_tokens);
+    const outputData = allModels.map(m => m.output_tokens);
+
+    charts.model = new Chart(ctx, {
+        type: 'bar',
+        data: {
+            labels,
+            datasets: [
+                { label: 'Input Tokens', data: inputData, backgroundColor: '#74b9ff99' },
+                { label: 'Output Tokens', data: outputData, backgroundColor: '#a29bfe99' },
+            ],
+        },
+        options: {
+            ...chartOptions('Tokens'),
+            indexAxis: 'y',
+            scales: {
+                x: { ticks: { color: '#6c7086', callback: v => formatTokens(v) }, grid: { color: '#31324422' } },
+                y: { ticks: { color: '#cdd6f4', font: { size: 11 } }, grid: { display: false } },
+            },
+        },
+    });
+}
+
+function renderQuotaGauges() {
+    const container = document.getElementById('quotaGauges');
+    container.innerHTML = '';
+    for (const name of ['claude', 'codex', 'antigravity']) {
+        const svc = getService(name);
+        const monthMsgs = thisMonthMessages(svc);
+        const limit = QUOTA_LIMITS[name].messages;
+        const pct = Math.min(100, Math.round((monthMsgs / limit) * 100));
+        const color = SERVICE_COLORS[name];
+        const barColor = pct > 80 ? '#f38ba8' : pct > 60 ? '#fab387' : color;
+
+        container.innerHTML += `
+            <div>
+                <div class="flex justify-between mb-2">
+                    <span class="text-sm font-medium" style="color:${color}">${SERVICE_LABELS[name]}</span>
+                    <span class="text-sm text-gray-400">${monthMsgs} / ${limit} ${QUOTA_LIMITS[name].label}</span>
+                </div>
+                <div class="w-full bg-dark-700 rounded-full h-4 overflow-hidden">
+                    <div class="h-full rounded-full transition-all duration-500" style="width:${pct}%;background:${barColor}"></div>
+                </div>
+                <p class="text-right text-xs text-gray-500 mt-1">${pct}%</p>
+            </div>`;
+    }
+}
+
+// Initial load + auto-refresh
+fetchData();
+setInterval(fetchData, 60000);
+</script>
+</body>
+</html>
