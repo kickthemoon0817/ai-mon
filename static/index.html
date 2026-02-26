@@ -86,7 +86,7 @@
 <script>
 const SERVICE_COLORS = { claude: '#d4a574', codex: '#74b9ff', antigravity: '#a29bfe' };
 const SERVICE_LABELS = { claude: 'Claude Code', codex: 'OpenAI Codex', antigravity: 'Antigravity' };
-const SERVICE_ICONS = { claude: '🧠', codex: '💻', antigravity: '🚀' };
+const SERVICE_ICONS = { claude: 'C', codex: 'X', antigravity: 'G' };
 
 // Rough monthly limits for consumer plans (estimates)
 const QUOTA_LIMITS = {
@@ -148,7 +148,7 @@ function renderCards() {
         container.innerHTML += `
             <div class="card glow-${name} p-6">
                 <div class="flex items-center gap-3 mb-4">
-                    <span class="text-2xl">${SERVICE_ICONS[name]}</span>
+                    <span class="text-lg font-bold w-8 h-8 rounded-lg flex items-center justify-center" style="background:${color}22;color:${color}">${SERVICE_ICONS[name]}</span>
                     <h3 class="text-lg font-semibold" style="color:${color}">${SERVICE_LABELS[name]}</h3>
                 </div>
                 <div class="grid grid-cols-2 gap-4">
@@ -165,8 +165,8 @@ function renderCards() {
                         <p class="text-xs text-gray-400">this month</p>
                     </div>
                     <div>
-                        <p class="text-2xl font-bold text-white">${formatTokens(svc.total_tokens)}</p>
-                        <p class="text-xs text-gray-400">${name === 'antigravity' ? 'total size' : 'tokens'}</p>
+                        <p class="text-2xl font-bold text-white">${name === 'antigravity' ? svc.total_tokens.toLocaleString() : formatTokens(svc.total_tokens)}</p>
+                        <p class="text-xs text-gray-400">${name === 'antigravity' ? 'model requests' : 'tokens'}</p>
                     </div>
                 </div>
                 ${svc.first_date ? `<p class="text-xs text-gray-500 mt-3">Active: ${svc.first_date} → ${svc.last_date}</p>` : ''}
@@ -282,22 +282,30 @@ function renderModelChart() {
     const allModels = [];
     for (const svc of data.services) {
         for (const mt of svc.model_tokens || []) {
-            allModels.push(mt);
+            allModels.push({ ...mt, service: svc.service });
         }
     }
     if (!allModels.length) return;
 
-    const labels = allModels.map(m => m.model.replace(/^claude-/, '').replace(/^gpt-/, ''));
-    const inputData = allModels.map(m => m.input_tokens);
-    const outputData = allModels.map(m => m.output_tokens);
+    const labels = allModels.map(m => {
+        const short = m.model.replace(/^claude-/, '').replace(/^gpt-/, '').replace(/^gemini-/, '');
+        const svcTag = { claude: 'CC', codex: 'CX', antigravity: 'AG' }[m.service] || '';
+        return `${short} [${svcTag}]`;
+    });
+
+    // For Antigravity models, input_tokens = request count (not actual tokens)
+    const isGemini = allModels.map(m => m.service === 'antigravity');
+    const dataset1 = allModels.map((m, i) => isGemini[i] ? m.input_tokens : m.input_tokens);
+    const dataset2 = allModels.map((m, i) => isGemini[i] ? 0 : m.output_tokens);
+    const barColors = allModels.map(m => SERVICE_COLORS[m.service] + '99');
 
     charts.model = new Chart(ctx, {
         type: 'bar',
         data: {
             labels,
             datasets: [
-                { label: 'Input Tokens', data: inputData, backgroundColor: '#74b9ff99' },
-                { label: 'Output Tokens', data: outputData, backgroundColor: '#a29bfe99' },
+                { label: 'Input Tokens / Requests', data: dataset1, backgroundColor: barColors },
+                { label: 'Output Tokens', data: dataset2, backgroundColor: allModels.map(() => '#a29bfe66') },
             ],
         },
         options: {
