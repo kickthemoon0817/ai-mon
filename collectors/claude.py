@@ -1,9 +1,68 @@
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from models import DailyUsage, ModelTokens, ServiceUsage
+from models import DailyUsage, ModelTokens, RateLimit, ServiceUsage
 
 STATS_PATH = Path.home() / ".claude" / "stats-cache.json"
+PROJECTS_DIR = Path.home() / ".claude" / "projects"
+
+
+def _compute_window_usage() -> list[RateLimit]:
+    """Compute rolling 5h and 7d token usage from session JSONL files."""
+    if not PROJECTS_DIR.exists():
+        return []
+
+    now = datetime.now(timezone.utc)
+    five_h_ago = now - timedelta(hours=5)
+    seven_d_ago = now - timedelta(days=7)
+
+    tokens_5h = 0
+    tokens_7d = 0
+
+    for fp in PROJECTS_DIR.rglob("*.jsonl"):
+        if "tool-results" in str(fp):
+            continue
+        try:
+            for line in fp.read_text(errors="replace").splitlines():
+                if '"assistant"' not in line:
+                    continue
+                data = json.loads(line)
+                if data.get("type") != "assistant":
+                    continue
+                ts_str = data.get("timestamp", "")
+                if not ts_str:
+                    continue
+                ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                usage = data.get("message", {}).get("usage", {})
+                total = usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
+
+                if ts >= five_h_ago:
+                    tokens_5h += total
+                if ts >= seven_d_ago:
+                    tokens_7d += total
+        except (json.JSONDecodeError, ValueError, OSError):
+            continue
+
+    five_h_reset = (now + timedelta(hours=5)).isoformat()
+    seven_d_reset = (now + timedelta(days=7)).isoformat()
+
+    return [
+        RateLimit(
+            name="5h window",
+            used_percent=0,  # no known limit, show raw tokens
+            window_minutes=300,
+            resets_at=five_h_reset,
+            used_tokens=tokens_5h,
+        ),
+        RateLimit(
+            name="7d window",
+            used_percent=0,
+            window_minutes=10080,
+            resets_at=seven_d_reset,
+            used_tokens=tokens_7d,
+        ),
+    ]
 
 
 def collect() -> ServiceUsage:
@@ -40,6 +99,7 @@ def collect() -> ServiceUsage:
         ))
 
     hour_counts = data.get("hourCounts", {})
+    rate_limits = _compute_window_usage()
 
     dates = [d.date for d in daily_usage]
     return ServiceUsage(
@@ -55,4 +115,5 @@ def collect() -> ServiceUsage:
         hour_counts=hour_counts,
         first_date=min(dates) if dates else None,
         last_date=max(dates) if dates else None,
+        rate_limits=rate_limits,
     )

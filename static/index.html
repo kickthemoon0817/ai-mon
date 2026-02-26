@@ -88,13 +88,6 @@ const SERVICE_COLORS = { claude: '#d4a574', codex: '#74b9ff', antigravity: '#a29
 const SERVICE_LABELS = { claude: 'Claude Code', codex: 'OpenAI Codex', antigravity: 'Antigravity' };
 const SERVICE_ICONS = { claude: 'C', codex: 'X', antigravity: 'G' };
 
-// Rough monthly limits for consumer plans (estimates)
-const QUOTA_LIMITS = {
-    claude: { messages: 1500, label: 'messages/month' },
-    codex: { messages: 500, label: 'messages/month' },
-    antigravity: { messages: 300, label: 'conversations/month' },
-};
-
 let charts = {};
 let data = null;
 
@@ -165,8 +158,8 @@ function renderCards() {
                         <p class="text-xs text-gray-400">this month</p>
                     </div>
                     <div>
-                        <p class="text-2xl font-bold text-white">${name === 'antigravity' ? svc.total_tokens.toLocaleString() : formatTokens(svc.total_tokens)}</p>
-                        <p class="text-xs text-gray-400">${name === 'antigravity' ? 'model requests' : 'tokens'}</p>
+                        <p class="text-2xl font-bold text-white">${formatTokens(svc.total_tokens)}</p>
+                        <p class="text-xs text-gray-400">tokens</p>
                     </div>
                 </div>
                 ${svc.first_date ? `<p class="text-xs text-gray-500 mt-3">Active: ${svc.first_date} → ${svc.last_date}</p>` : ''}
@@ -319,6 +312,69 @@ function renderModelChart() {
     });
 }
 
+function renderRateLimitBar(rl, color) {
+    const hasPercent = rl.used_percent > 0;
+    const hasTokens = (rl.used_tokens || 0) > 0;
+    const resetStr = rl.resets_at ? new Date(rl.resets_at).toLocaleString() : '';
+
+    if (hasPercent) {
+        // Codex-style: real percentage
+        const pct = Math.min(100, Math.round(rl.used_percent));
+        const remain = Math.max(0, 100 - pct);
+        const barColor = pct > 80 ? '#f38ba8' : pct > 60 ? '#fab387' : color;
+        return `
+            <div class="mb-3">
+                <div class="flex justify-between mb-1">
+                    <span class="text-xs text-gray-300">${rl.name}</span>
+                    <span class="text-xs text-gray-400">${pct}% used / ${remain}% remaining</span>
+                </div>
+                <div class="w-full bg-dark-700 rounded-full h-3 overflow-hidden">
+                    <div class="h-full rounded-full transition-all duration-500" style="width:${pct}%;background:${barColor}"></div>
+                </div>
+                <div class="flex justify-between mt-1">
+                    <span class="text-xs text-gray-500">${rl.window_minutes}min window</span>
+                    ${resetStr ? `<span class="text-xs text-gray-500">Resets: ${resetStr}</span>` : ''}
+                </div>
+            </div>`;
+    } else if (hasTokens) {
+        // Claude-style: token count for window (no known limit)
+        return `
+            <div class="mb-3">
+                <div class="flex justify-between mb-1">
+                    <span class="text-xs text-gray-300">${rl.name}</span>
+                    <span class="text-xs text-white font-medium">${formatTokens(rl.used_tokens)} tokens used</span>
+                </div>
+                <div class="w-full bg-dark-700 rounded-full h-3 overflow-hidden">
+                    <div class="h-full rounded-full" style="width:100%;background:${color}44"></div>
+                </div>
+                <div class="flex justify-between mt-1">
+                    <span class="text-xs text-gray-500">${rl.window_minutes}min rolling window</span>
+                    <span class="text-xs text-gray-500">Computed from session data</span>
+                </div>
+            </div>`;
+    }
+    return '';
+}
+
+function renderModelBreakdown(models, color) {
+    if (!models || !models.length) return '';
+    let html = '<div class="mt-3 space-y-2">';
+    for (const mt of models) {
+        const name = mt.model.replace(/^gemini-/, '').replace(/^claude-/, '').replace(/^gpt-/, '');
+        const total = mt.input_tokens + mt.output_tokens;
+        html += `
+            <div class="flex items-center justify-between text-xs">
+                <span class="text-gray-300 font-mono">${name}</span>
+                <span class="text-gray-400">
+                    ${formatTokens(mt.input_tokens)} in / ${formatTokens(mt.output_tokens)} out
+                    ${mt.cache_read_tokens ? ` / ${formatTokens(mt.cache_read_tokens)} cached` : ''}
+                </span>
+            </div>`;
+    }
+    html += '</div>';
+    return html;
+}
+
 function renderQuotaGauges() {
     const container = document.getElementById('quotaGauges');
     container.innerHTML = '';
@@ -327,58 +383,28 @@ function renderQuotaGauges() {
         const svc = getService(name);
         const color = SERVICE_COLORS[name];
         const monthMsgs = thisMonthMessages(svc);
-        const hasRealLimits = (svc.rate_limits || []).length > 0;
+        const rateLimits = svc.rate_limits || [];
 
         let sectionHtml = `<div class="mb-6 last:mb-0">
             <h3 class="text-sm font-semibold mb-3" style="color:${color}">${SERVICE_LABELS[name]}</h3>`;
 
-        if (hasRealLimits) {
-            // Real rate limit data (Codex)
-            for (const rl of svc.rate_limits) {
-                const pct = Math.min(100, Math.round(rl.used_percent));
-                const remain = Math.max(0, 100 - pct);
-                const barColor = pct > 80 ? '#f38ba8' : pct > 60 ? '#fab387' : color;
-                const resetStr = rl.resets_at ? new Date(rl.resets_at).toLocaleString() : 'unknown';
-
-                sectionHtml += `
-                    <div class="mb-3">
-                        <div class="flex justify-between mb-1">
-                            <span class="text-xs text-gray-300">${rl.name}</span>
-                            <span class="text-xs text-gray-400">${pct}% used / ${remain}% remaining</span>
-                        </div>
-                        <div class="w-full bg-dark-700 rounded-full h-3 overflow-hidden">
-                            <div class="h-full rounded-full transition-all duration-500" style="width:${pct}%;background:${barColor}"></div>
-                        </div>
-                        <div class="flex justify-between mt-1">
-                            <span class="text-xs text-gray-500">${rl.window_minutes}min window</span>
-                            <span class="text-xs text-gray-500">Resets: ${resetStr}</span>
-                        </div>
-                    </div>`;
+        // Rate limit bars
+        if (rateLimits.length > 0) {
+            for (const rl of rateLimits) {
+                sectionHtml += renderRateLimitBar(rl, color);
             }
-            sectionHtml += `<p class="text-xs text-gray-500">This month: ${monthMsgs.toLocaleString()} messages | All time: ${svc.total_messages.toLocaleString()}</p>`;
-        } else {
-            // Estimated quota (Claude, Antigravity)
-            const limit = QUOTA_LIMITS[name].messages;
-            const pct = Math.min(100, Math.round((monthMsgs / limit) * 100));
-            const remain = Math.max(0, limit - monthMsgs);
-            const barColor = pct > 80 ? '#f38ba8' : pct > 60 ? '#fab387' : color;
-
-            sectionHtml += `
-                <div class="mb-3">
-                    <div class="flex justify-between mb-1">
-                        <span class="text-xs text-gray-300">Estimated monthly quota</span>
-                        <span class="text-xs text-gray-400">${monthMsgs.toLocaleString()} / ~${limit.toLocaleString()} ${QUOTA_LIMITS[name].label}</span>
-                    </div>
-                    <div class="w-full bg-dark-700 rounded-full h-3 overflow-hidden">
-                        <div class="h-full rounded-full transition-all duration-500" style="width:${pct}%;background:${barColor}"></div>
-                    </div>
-                    <div class="flex justify-between mt-1">
-                        <span class="text-xs text-gray-500">~${remain.toLocaleString()} remaining (est.)</span>
-                        <span class="text-xs text-gray-500">${pct}%</span>
-                    </div>
-                </div>
-                <p class="text-xs text-gray-500">All time: ${svc.total_messages.toLocaleString()} ${name === 'antigravity' ? 'conversations' : 'messages'} | ${svc.total_sessions.toLocaleString()} sessions</p>`;
         }
+
+        // Per-model breakdown for services with model data
+        const models = svc.model_tokens || [];
+        if (models.length > 0) {
+            sectionHtml += `<div class="mt-2 mb-2"><span class="text-xs text-gray-400 font-medium">Per-model breakdown:</span></div>`;
+            sectionHtml += renderModelBreakdown(models, color);
+        }
+
+        // Summary line
+        const metric = name === 'antigravity' ? 'conversations' : 'messages';
+        sectionHtml += `<p class="text-xs text-gray-500 mt-3">This month: ${monthMsgs.toLocaleString()} ${metric} | All time: ${svc.total_messages.toLocaleString()} | ${svc.total_sessions.toLocaleString()} sessions</p>`;
 
         sectionHtml += '</div>';
         container.innerHTML += sectionHtml;

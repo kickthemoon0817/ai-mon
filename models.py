@@ -24,6 +24,7 @@ class RateLimit(BaseModel):
     used_percent: float = 0.0
     window_minutes: int = 0
     resets_at: str | None = None  # ISO timestamp
+    used_tokens: int = 0  # raw token count for window
 
 
 class ServiceUsage(BaseModel):
