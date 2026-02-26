@@ -76,10 +76,10 @@
             </div>
         </div>
 
-        <!-- Quota Gauges -->
+        <!-- Rate Limits & Quota -->
         <div class="card p-6 mb-8">
-            <h2 class="text-lg font-semibold text-white mb-4">Estimated Quota Usage (This Period)</h2>
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-6" id="quotaGauges"></div>
+            <h2 class="text-lg font-semibold text-white mb-4">Rate Limits & Quota</h2>
+            <div id="quotaGauges"></div>
         </div>
     </div>
 
@@ -124,7 +124,7 @@ function render() {
 }
 
 function getService(name) {
-    return data.services.find(s => s.service === name) || { daily_usage: [], model_tokens: [], total_messages: 0, total_sessions: 0, total_tokens: 0, hour_counts: {} };
+    return data.services.find(s => s.service === name) || { daily_usage: [], model_tokens: [], total_messages: 0, total_sessions: 0, total_tokens: 0, hour_counts: {}, rate_limits: [] };
 }
 
 function thisMonthMessages(svc) {
@@ -322,25 +322,66 @@ function renderModelChart() {
 function renderQuotaGauges() {
     const container = document.getElementById('quotaGauges');
     container.innerHTML = '';
+
     for (const name of ['claude', 'codex', 'antigravity']) {
         const svc = getService(name);
-        const monthMsgs = thisMonthMessages(svc);
-        const limit = QUOTA_LIMITS[name].messages;
-        const pct = Math.min(100, Math.round((monthMsgs / limit) * 100));
         const color = SERVICE_COLORS[name];
-        const barColor = pct > 80 ? '#f38ba8' : pct > 60 ? '#fab387' : color;
+        const monthMsgs = thisMonthMessages(svc);
+        const hasRealLimits = (svc.rate_limits || []).length > 0;
 
-        container.innerHTML += `
-            <div>
-                <div class="flex justify-between mb-2">
-                    <span class="text-sm font-medium" style="color:${color}">${SERVICE_LABELS[name]}</span>
-                    <span class="text-sm text-gray-400">${monthMsgs} / ${limit} ${QUOTA_LIMITS[name].label}</span>
+        let sectionHtml = `<div class="mb-6 last:mb-0">
+            <h3 class="text-sm font-semibold mb-3" style="color:${color}">${SERVICE_LABELS[name]}</h3>`;
+
+        if (hasRealLimits) {
+            // Real rate limit data (Codex)
+            for (const rl of svc.rate_limits) {
+                const pct = Math.min(100, Math.round(rl.used_percent));
+                const remain = Math.max(0, 100 - pct);
+                const barColor = pct > 80 ? '#f38ba8' : pct > 60 ? '#fab387' : color;
+                const resetStr = rl.resets_at ? new Date(rl.resets_at).toLocaleString() : 'unknown';
+
+                sectionHtml += `
+                    <div class="mb-3">
+                        <div class="flex justify-between mb-1">
+                            <span class="text-xs text-gray-300">${rl.name}</span>
+                            <span class="text-xs text-gray-400">${pct}% used / ${remain}% remaining</span>
+                        </div>
+                        <div class="w-full bg-dark-700 rounded-full h-3 overflow-hidden">
+                            <div class="h-full rounded-full transition-all duration-500" style="width:${pct}%;background:${barColor}"></div>
+                        </div>
+                        <div class="flex justify-between mt-1">
+                            <span class="text-xs text-gray-500">${rl.window_minutes}min window</span>
+                            <span class="text-xs text-gray-500">Resets: ${resetStr}</span>
+                        </div>
+                    </div>`;
+            }
+            sectionHtml += `<p class="text-xs text-gray-500">This month: ${monthMsgs.toLocaleString()} messages | All time: ${svc.total_messages.toLocaleString()}</p>`;
+        } else {
+            // Estimated quota (Claude, Antigravity)
+            const limit = QUOTA_LIMITS[name].messages;
+            const pct = Math.min(100, Math.round((monthMsgs / limit) * 100));
+            const remain = Math.max(0, limit - monthMsgs);
+            const barColor = pct > 80 ? '#f38ba8' : pct > 60 ? '#fab387' : color;
+
+            sectionHtml += `
+                <div class="mb-3">
+                    <div class="flex justify-between mb-1">
+                        <span class="text-xs text-gray-300">Estimated monthly quota</span>
+                        <span class="text-xs text-gray-400">${monthMsgs.toLocaleString()} / ~${limit.toLocaleString()} ${QUOTA_LIMITS[name].label}</span>
+                    </div>
+                    <div class="w-full bg-dark-700 rounded-full h-3 overflow-hidden">
+                        <div class="h-full rounded-full transition-all duration-500" style="width:${pct}%;background:${barColor}"></div>
+                    </div>
+                    <div class="flex justify-between mt-1">
+                        <span class="text-xs text-gray-500">~${remain.toLocaleString()} remaining (est.)</span>
+                        <span class="text-xs text-gray-500">${pct}%</span>
+                    </div>
                 </div>
-                <div class="w-full bg-dark-700 rounded-full h-4 overflow-hidden">
-                    <div class="h-full rounded-full transition-all duration-500" style="width:${pct}%;background:${barColor}"></div>
-                </div>
-                <p class="text-right text-xs text-gray-500 mt-1">${pct}%</p>
-            </div>`;
+                <p class="text-xs text-gray-500">All time: ${svc.total_messages.toLocaleString()} ${name === 'antigravity' ? 'conversations' : 'messages'} | ${svc.total_sessions.toLocaleString()} sessions</p>`;
+        }
+
+        sectionHtml += '</div>';
+        container.innerHTML += sectionHtml;
     }
 }
 

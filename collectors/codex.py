@@ -2,7 +2,9 @@ import json
 from collections import defaultdict
 from pathlib import Path
 
-from models import DailyUsage, ModelTokens, ServiceUsage
+from datetime import datetime, timezone
+
+from models import DailyUsage, ModelTokens, RateLimit, ServiceUsage
 
 SESSIONS_DIR = Path.home() / ".codex" / "sessions"
 
@@ -18,6 +20,8 @@ def collect() -> ServiceUsage:
     total_output = 0
     model_token_map: dict[str, dict[str, int]] = defaultdict(lambda: {"input": 0, "output": 0})
     hour_counts: dict[str, int] = defaultdict(int)
+    latest_rate_limits: dict | None = None
+    latest_rate_ts = ""
 
     for session_file in sorted(SESSIONS_DIR.rglob("*.jsonl")):
         # Extract date from path: sessions/YYYY/MM/DD/file.jsonl
@@ -74,6 +78,12 @@ def collect() -> ServiceUsage:
                     if model_name:
                         model_token_map[model_name]["input"] += inp
                         model_token_map[model_name]["output"] += out
+                    # Track latest rate limits
+                    rl = payload.get("rate_limits")
+                    ts = entry.get("timestamp", "")
+                    if rl and ts > latest_rate_ts:
+                        latest_rate_ts = ts
+                        latest_rate_limits = rl
 
         total_messages += session_messages
         daily[date_str].message_count += session_messages
@@ -87,6 +97,23 @@ def collect() -> ServiceUsage:
         for m, v in model_token_map.items()
     ]
 
+    # Build rate limits from latest data
+    rate_limits = []
+    if latest_rate_limits:
+        for key, label in [("primary", "5h window"), ("secondary", "7d window")]:
+            rl = latest_rate_limits.get(key, {})
+            if rl:
+                resets = rl.get("resets_at")
+                resets_iso = None
+                if resets:
+                    resets_iso = datetime.fromtimestamp(resets, tz=timezone.utc).isoformat()
+                rate_limits.append(RateLimit(
+                    name=label,
+                    used_percent=rl.get("used_percent", 0),
+                    window_minutes=rl.get("window_minutes", 0),
+                    resets_at=resets_iso,
+                ))
+
     dates = [d.date for d in daily_usage]
     return ServiceUsage(
         service="codex",
@@ -98,4 +125,5 @@ def collect() -> ServiceUsage:
         hour_counts=dict(hour_counts),
         first_date=min(dates) if dates else None,
         last_date=max(dates) if dates else None,
+        rate_limits=rate_limits,
     )

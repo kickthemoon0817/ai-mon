@@ -19,6 +19,13 @@ class ModelTokens(BaseModel):
     cache_creation_tokens: int = 0
 
 
+class RateLimit(BaseModel):
+    name: str  # e.g. "primary", "secondary", "weekly"
+    used_percent: float = 0.0
+    window_minutes: int = 0
+    resets_at: str | None = None  # ISO timestamp
+
+
 class ServiceUsage(BaseModel):
     service: str
     daily_usage: list[DailyUsage] = []
@@ -29,6 +36,7 @@ class ServiceUsage(BaseModel):
     hour_counts: dict[str, int] = {}
     first_date: str | None = None
     last_date: str | None = None
+    rate_limits: list[RateLimit] = []
 
 
 class UsageSummary(BaseModel):
