@@ -1,0 +1,12 @@
+[project]
+name = "ai-mon"
+version = "0.1.0"
+description = "AI Usage Monitor - track Claude Code, Codex, and Antigravity usage"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["."]
