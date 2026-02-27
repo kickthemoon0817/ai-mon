@@ -25,6 +25,7 @@ class RateLimit(BaseModel):
     window_minutes: int = 0
     resets_at: str | None = None  # ISO timestamp
     used_tokens: int = 0  # raw token count for window
+    model_breakdown: list[ModelTokens] = []  # per-model breakdown within window
 
 
 class ServiceUsage(BaseModel):

@@ -1,5 +1,7 @@
 import json
+import logging
 import re
+import sqlite3
 import urllib.request
 from collections import defaultdict
 from datetime import datetime
@@ -7,11 +9,19 @@ from pathlib import Path
 
 from models import DailyUsage, ModelTokens, RateLimit, ServiceUsage
 
+log = logging.getLogger(__name__)
+
 BASE_DIR = Path.home() / ".gemini" / "antigravity"
 CONV_DIR = BASE_DIR / "conversations"
 IMPLICIT_DIR = BASE_DIR / "implicit"
 DAEMON_DIR = BASE_DIR / "daemon"
 TMP_DIR = Path.home() / ".gemini" / "tmp"
+
+STATE_VSCDB = (
+    Path.home() / "Library" / "Application Support" / "Antigravity"
+    / "User" / "globalStorage" / "state.vscdb"
+)
+CLOUD_API_URL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
 
 _PLANNER_RE = re.compile(r"Requesting planner with (\d+) chat messages")
 _LOG_TS_RE = re.compile(r"^[IE](\d{4}) (\d{2}:\d{2}:\d{2})")
@@ -68,6 +78,69 @@ def _query_model_quotas() -> list[RateLimit]:
         used_pct = round((1.0 - remaining) * 100, 1)
         rate_limits.append(RateLimit(
             name=label,
+            used_percent=used_pct,
+            window_minutes=0,
+            resets_at=reset_time,
+        ))
+
+    return rate_limits
+
+
+def _get_oauth_token() -> str | None:
+    """Read the Google OAuth token from Antigravity's state database."""
+    if not STATE_VSCDB.exists():
+        return None
+    try:
+        db = sqlite3.connect(str(STATE_VSCDB))
+        row = db.execute(
+            "SELECT value FROM ItemTable WHERE key='antigravityAuthStatus'"
+        ).fetchone()
+        db.close()
+        if not row:
+            return None
+        data = json.loads(row[0])
+        return data.get("apiKey")
+    except Exception as exc:
+        log.debug("Failed to read Antigravity OAuth token: %s", exc)
+        return None
+
+
+def _query_cloud_api() -> list[RateLimit]:
+    """Query Google Cloud API for per-model quota using stored OAuth token."""
+    token = _get_oauth_token()
+    if not token:
+        return []
+
+    try:
+        req = urllib.request.Request(
+            CLOUD_API_URL,
+            data=b"{}",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+                "User-Agent": "antigravity",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read())
+    except Exception as exc:
+        log.debug("Antigravity cloud API call failed: %s", exc)
+        return []
+
+    rate_limits: list[RateLimit] = []
+    for model_id, info in body.get("models", {}).items():
+        display_name = info.get("displayName")
+        if not display_name:
+            continue  # skip internal models (chat_*, tab_*)
+        quota = info.get("quotaInfo", {})
+        remaining = quota.get("remainingFraction")
+        if remaining is None:
+            continue
+        used_pct = round((1.0 - remaining) * 100, 1)
+        reset_time = quota.get("resetTime")  # ISO string or None
+        rate_limits.append(RateLimit(
+            name=display_name,
             used_percent=used_pct,
             window_minutes=0,
             resets_at=reset_time,
@@ -197,8 +270,10 @@ def collect() -> ServiceUsage:
         ))
         total_all_tokens += inp + out
 
-    # Query live quota from daemon
+    # Query live quota: try local daemon first, fall back to cloud API
     rate_limits = _query_model_quotas()
+    if not rate_limits:
+        rate_limits = _query_cloud_api()
 
     daily_usage = sorted(daily.values(), key=lambda d: d.date)
     dates = [d.date for d in daily_usage]

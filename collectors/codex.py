@@ -20,8 +20,9 @@ def collect() -> ServiceUsage:
     total_output = 0
     model_token_map: dict[str, dict[str, int]] = defaultdict(lambda: {"input": 0, "output": 0})
     hour_counts: dict[str, int] = defaultdict(int)
-    latest_rate_limits: dict | None = None
-    latest_rate_ts = ""
+    # Track latest rate limits per limit_id (e.g. "codex", "codex_bengalfox")
+    latest_rate_groups: dict[str, dict] = {}
+    latest_rate_ts_by_id: dict[str, str] = {}
 
     for session_file in sorted(SESSIONS_DIR.rglob("*.jsonl")):
         # Extract date from path: sessions/YYYY/MM/DD/file.jsonl
@@ -78,12 +79,14 @@ def collect() -> ServiceUsage:
                     if model_name:
                         model_token_map[model_name]["input"] += inp
                         model_token_map[model_name]["output"] += out
-                    # Track latest rate limits
+                    # Track latest rate limits per limit_id
                     rl = payload.get("rate_limits")
                     ts = entry.get("timestamp", "")
-                    if rl and ts > latest_rate_ts:
-                        latest_rate_ts = ts
-                        latest_rate_limits = rl
+                    if rl and ts:
+                        lid = rl.get("limit_id", "")
+                        if lid and ts > latest_rate_ts_by_id.get(lid, ""):
+                            latest_rate_ts_by_id[lid] = ts
+                            latest_rate_groups[lid] = rl
 
         total_messages += session_messages
         daily[date_str].message_count += session_messages
@@ -97,22 +100,25 @@ def collect() -> ServiceUsage:
         for m, v in model_token_map.items()
     ]
 
-    # Build rate limits from latest data
+    # Build rate limits from latest data for each limit group
     rate_limits = []
-    if latest_rate_limits:
+    for lid, group in latest_rate_groups.items():
+        prefix = group.get("limit_name") or ""
         for key, label in [("primary", "5h window"), ("secondary", "7d window")]:
-            rl = latest_rate_limits.get(key, {})
-            if rl:
-                resets = rl.get("resets_at")
-                resets_iso = None
-                if resets:
-                    resets_iso = datetime.fromtimestamp(resets, tz=timezone.utc).isoformat()
-                rate_limits.append(RateLimit(
-                    name=label,
-                    used_percent=rl.get("used_percent", 0),
-                    window_minutes=rl.get("window_minutes", 0),
-                    resets_at=resets_iso,
-                ))
+            rl = group.get(key, {})
+            if not rl:
+                continue
+            name = f"{prefix} {label}" if prefix else label
+            resets = rl.get("resets_at")
+            resets_iso = None
+            if resets:
+                resets_iso = datetime.fromtimestamp(resets, tz=timezone.utc).isoformat()
+            rate_limits.append(RateLimit(
+                name=name,
+                used_percent=rl.get("used_percent", 0),
+                window_minutes=rl.get("window_minutes", 0),
+                resets_at=resets_iso,
+            ))
 
     dates = [d.date for d in daily_usage]
     return ServiceUsage(

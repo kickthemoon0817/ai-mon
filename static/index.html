@@ -46,6 +46,18 @@
             </div>
         </div>
 
+        <!-- Rate Limits & Quota -->
+        <div class="card p-6 mb-8">
+            <h2 class="text-lg font-semibold text-white mb-4">Rate Limits & Quota</h2>
+            <div id="quotaGauges"></div>
+        </div>
+
+        <!-- Token Breakdown by Window -->
+        <div class="card p-6 mb-8">
+            <h2 class="text-lg font-semibold text-white mb-4">Token Breakdown by Window</h2>
+            <div id="tokenBreakdown"></div>
+        </div>
+
         <!-- Service Cards -->
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8" id="serviceCards"></div>
 
@@ -74,12 +86,6 @@
                 <h2 class="text-lg font-semibold text-white mb-4">Model Usage</h2>
                 <canvas id="modelChart" height="200"></canvas>
             </div>
-        </div>
-
-        <!-- Rate Limits & Quota -->
-        <div class="card p-6 mb-8">
-            <h2 class="text-lg font-semibold text-white mb-4">Rate Limits & Quota</h2>
-            <div id="quotaGauges"></div>
         </div>
     </div>
 
@@ -114,6 +120,7 @@ function render() {
     renderHourlyGrid();
     renderModelChart();
     renderQuotaGauges();
+    renderTokenBreakdown();
 }
 
 function getService(name) {
@@ -313,20 +320,20 @@ function renderModelChart() {
 }
 
 function renderRateLimitBar(rl, color) {
-    const hasPercent = rl.used_percent > 0;
+    const hasPercent = rl.used_percent > 0 || rl.resets_at;
     const hasTokens = (rl.used_tokens || 0) > 0;
     const resetStr = rl.resets_at ? new Date(rl.resets_at).toLocaleString() : '';
 
     if (hasPercent) {
-        // Codex-style: real percentage
         const pct = Math.min(100, Math.round(rl.used_percent));
         const remain = Math.max(0, 100 - pct);
         const barColor = pct > 80 ? '#f38ba8' : pct > 60 ? '#fab387' : color;
+        const tokenInfo = hasTokens ? ` | ${formatTokens(rl.used_tokens)} tokens` : '';
         return `
             <div class="mb-3">
                 <div class="flex justify-between mb-1">
                     <span class="text-xs text-gray-300">${rl.name}</span>
-                    <span class="text-xs text-gray-400">${pct}% used / ${remain}% remaining</span>
+                    <span class="text-xs text-gray-400">${pct}% used / ${remain}% remaining${tokenInfo}</span>
                 </div>
                 <div class="w-full bg-dark-700 rounded-full h-3 overflow-hidden">
                     <div class="h-full rounded-full transition-all duration-500" style="width:${pct}%;background:${barColor}"></div>
@@ -337,7 +344,7 @@ function renderRateLimitBar(rl, color) {
                 </div>
             </div>`;
     } else if (hasTokens) {
-        // Claude-style: token count for window (no known limit)
+        const resetInfo = rl.resets_at ? `Next drop: ${new Date(rl.resets_at).toLocaleString()}` : 'Computed from session data';
         return `
             <div class="mb-3">
                 <div class="flex justify-between mb-1">
@@ -349,30 +356,52 @@ function renderRateLimitBar(rl, color) {
                 </div>
                 <div class="flex justify-between mt-1">
                     <span class="text-xs text-gray-500">${rl.window_minutes}min rolling window</span>
-                    <span class="text-xs text-gray-500">Computed from session data</span>
+                    <span class="text-xs text-gray-500">${resetInfo}</span>
                 </div>
             </div>`;
     }
     return '';
 }
 
-function renderModelBreakdown(models, color) {
-    if (!models || !models.length) return '';
-    let html = '<div class="mt-3 space-y-2">';
-    for (const mt of models) {
-        const name = mt.model.replace(/^gemini-/, '').replace(/^claude-/, '').replace(/^gpt-/, '');
-        const total = mt.input_tokens + mt.output_tokens;
-        html += `
-            <div class="flex items-center justify-between text-xs">
-                <span class="text-gray-300 font-mono">${name}</span>
-                <span class="text-gray-400">
-                    ${formatTokens(mt.input_tokens)} in / ${formatTokens(mt.output_tokens)} out
-                    ${mt.cache_read_tokens ? ` / ${formatTokens(mt.cache_read_tokens)} cached` : ''}
-                </span>
-            </div>`;
+function renderTokenBreakdown() {
+    const container = document.getElementById('tokenBreakdown');
+    container.innerHTML = '';
+
+    for (const name of ['claude', 'codex', 'antigravity']) {
+        const svc = getService(name);
+        const color = SERVICE_COLORS[name];
+        const rateLimits = svc.rate_limits || [];
+
+        // Collect windows that have model breakdowns
+        const breakdowns = [];
+        for (const rl of rateLimits) {
+            if ((rl.model_breakdown || []).length > 0) {
+                breakdowns.push({ window: rl.name, models: rl.model_breakdown });
+            }
+        }
+        if (!breakdowns.length) continue;
+
+        let html = `<div class="mb-6 last:mb-0">
+            <h3 class="text-sm font-semibold mb-3" style="color:${color}">${SERVICE_LABELS[name]}</h3>`;
+        for (const bd of breakdowns) {
+            html += `<div class="mb-3"><span class="text-xs text-gray-500">${bd.window}</span>`;
+            html += `<div class="mt-1 pl-1 border-l-2" style="border-color:${color}44">`;
+            for (const m of bd.models) {
+                const mname = m.model.replace(/^claude-/, '').replace(/^gpt-/, '').replace(/^gemini-/, '');
+                const total = (m.input_tokens || 0) + (m.output_tokens || 0) + (m.cache_read_tokens || 0) + (m.cache_creation_tokens || 0);
+                const parts = [`${formatTokens(m.input_tokens || 0)} in`, `${formatTokens(m.output_tokens || 0)} out`];
+                if (m.cache_read_tokens) parts.push(`${formatTokens(m.cache_read_tokens)} cache-read`);
+                if (m.cache_creation_tokens) parts.push(`${formatTokens(m.cache_creation_tokens)} cache-create`);
+                html += `<div class="flex items-center justify-between text-xs py-0.5">
+                    <span class="text-gray-300 font-mono">${mname}</span>
+                    <span class="text-gray-400">${formatTokens(total)} (${parts.join(' / ')})</span>
+                </div>`;
+            }
+            html += '</div></div>';
+        }
+        html += '</div>';
+        container.innerHTML += html;
     }
-    html += '</div>';
-    return html;
 }
 
 function renderQuotaGauges() {
@@ -393,13 +422,6 @@ function renderQuotaGauges() {
             for (const rl of rateLimits) {
                 sectionHtml += renderRateLimitBar(rl, color);
             }
-        }
-
-        // Per-model breakdown for services with model data
-        const models = svc.model_tokens || [];
-        if (models.length > 0) {
-            sectionHtml += `<div class="mt-2 mb-2"><span class="text-xs text-gray-400 font-medium">Per-model breakdown:</span></div>`;
-            sectionHtml += renderModelBreakdown(models, color);
         }
 
         // Summary line
