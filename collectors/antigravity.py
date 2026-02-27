@@ -1,10 +1,11 @@
 import json
 import re
+import urllib.request
 from collections import defaultdict
 from datetime import datetime
 from pathlib import Path
 
-from models import DailyUsage, ModelTokens, ServiceUsage
+from models import DailyUsage, ModelTokens, RateLimit, ServiceUsage
 
 BASE_DIR = Path.home() / ".gemini" / "antigravity"
 CONV_DIR = BASE_DIR / "conversations"
@@ -15,6 +16,64 @@ TMP_DIR = Path.home() / ".gemini" / "tmp"
 _PLANNER_RE = re.compile(r"Requesting planner with (\d+) chat messages")
 _LOG_TS_RE = re.compile(r"^[IE](\d{4}) (\d{2}:\d{2}:\d{2})")
 _MODEL_RE = re.compile(r"model (gemini-[a-z0-9._-]+)")
+
+
+def _get_daemon_connection() -> tuple[int, str] | None:
+    """Read daemon discovery file for HTTP port and CSRF token."""
+    if not DAEMON_DIR.exists():
+        return None
+    for f in DAEMON_DIR.glob("ls_*.json"):
+        try:
+            data = json.loads(f.read_text())
+            return data["httpPort"], data["csrfToken"]
+        except (json.JSONDecodeError, KeyError, OSError):
+            continue
+    return None
+
+
+def _query_model_quotas() -> list[RateLimit]:
+    """Query the local Antigravity daemon for per-model quota info."""
+    conn = _get_daemon_connection()
+    if not conn:
+        return []
+
+    port, csrf = conn
+    url = f"http://localhost:{port}/exa.language_server_pb.LanguageServerService/GetCascadeModelConfigData"
+
+    try:
+        req = urllib.request.Request(
+            url,
+            data=b"{}",
+            headers={
+                "Content-Type": "application/json",
+                "x-codeium-csrf-token": csrf,
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            data = json.loads(resp.read())
+    except Exception:
+        return []
+
+    rate_limits = []
+    for cfg in data.get("clientModelConfigs", []):
+        label = cfg.get("label", "")
+        quota = cfg.get("quotaInfo", {})
+        remaining = quota.get("remainingFraction")
+        reset_time = quota.get("resetTime")
+
+        if remaining is None:
+            continue
+
+        used_pct = round((1.0 - remaining) * 100, 1)
+        rate_limits.append(RateLimit(
+            name=label,
+            used_percent=used_pct,
+            window_minutes=0,
+            resets_at=reset_time,
+        ))
+
+    return rate_limits
 
 
 def _parse_session_jsons() -> dict[str, dict[str, int]]:
@@ -117,19 +176,17 @@ def collect() -> ServiceUsage:
             daily[date_str] = DailyUsage(date=date_str)
         daily[date_str].message_count += count
 
-    # Build model tokens - prefer session data (has real tokens), fall back to daemon data
+    # Build model tokens from session data
     model_tokens = []
     all_models = set(session_model_stats.keys()) | set(daemon_model_requests.keys())
     total_all_tokens = 0
 
     for model in sorted(all_models):
         sess = session_model_stats.get(model, {})
-        daemon_reqs = daemon_model_requests.get(model, 0)
         inp = sess.get("input", 0)
         out = sess.get("output", 0)
         cached = sess.get("cached", 0)
         thoughts = sess.get("thoughts", 0)
-        requests = sess.get("requests", 0) or daemon_reqs
 
         model_tokens.append(ModelTokens(
             model=model,
@@ -139,6 +196,9 @@ def collect() -> ServiceUsage:
             cache_creation_tokens=thoughts,
         ))
         total_all_tokens += inp + out
+
+    # Query live quota from daemon
+    rate_limits = _query_model_quotas()
 
     daily_usage = sorted(daily.values(), key=lambda d: d.date)
     dates = [d.date for d in daily_usage]
@@ -153,4 +213,5 @@ def collect() -> ServiceUsage:
         hour_counts=dict(hour_counts),
         first_date=min(dates) if dates else None,
         last_date=max(dates) if dates else None,
+        rate_limits=rate_limits,
     )
